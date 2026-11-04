@@ -4,7 +4,7 @@
 
 ## 安装
 
-在 Tampermonkey 中直接安装：[NodeSeek Issue Templates.min.user.js](https://github.com/ruoqianfengshao/nodeseek-issue-template/releases/latest/download/NodeSeek.Issue.Templates.min.user.js)。
+在 Tampermonkey 中直接安装：[NodeSeek Issue Templates.min.user.js](https://raw.githubusercontent.com/gnafehefang/nodeseek-issue-template/main/NodeSeek%20Issue%20Templates.min.user.js)。
 
 脚本在 NodeSeek 各页面提供对应功能：发帖与编辑页有“出🐔模板”“收🐔模板”和“🎁 抽奖配置”，帖子页有抽奖跟踪、交易状态与「我的回复」，列表页有关键字过滤。
 
