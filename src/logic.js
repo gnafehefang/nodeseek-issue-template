@@ -366,16 +366,42 @@
     return result;
   }
 
+  // 剩余价值按「从到期日往回数整周期 + 最前面不满一个周期的部分」计算：
+  // 整周期各算 1 份，残缺周期按它自身的实际天数折算（addMonths 统一处理月末）。
+  // 这样剩余多个周期时不会再拿到期前最后一个周期的天数去折算全部剩余天数。
   function calculation(values) {
     const expiry = parseDate(values.expiryDate);
     const trade = parseDate(values.tradeDate);
     const amount = Number(values.renewalAmount);
     const months = CYCLE_MONTHS[values.renewalCycle];
-    if (!expiry || !trade || !Number.isFinite(amount) || amount < 0) return null;
-    const cycleDays = months ? differenceInDays(expiry, addMonths(expiry, -months)) : 0;
-    if (!Number.isFinite(cycleDays) || cycleDays <= 0) return null;
+    if (!expiry || !trade || !Number.isFinite(amount) || amount < 0 || !months) return null;
     const daysLeft = differenceInDays(expiry, trade);
-    return { amount, cycleDays, daysLeft, percentage: Math.min(100, daysLeft / cycleDays * 100), value: amount * daysLeft / cycleDays };
+    let wholeCycles = 0;
+    // 每一步都以到期日为锚点回推，避免 31 号这类月末日期逐月漂移。
+    while (wholeCycles < 1200 && addMonths(expiry, -(wholeCycles + 1) * months).getTime() >= trade.getTime()) wholeCycles += 1;
+    const periodEnd = addMonths(expiry, -wholeCycles * months);
+    const periodStart = addMonths(expiry, -(wholeCycles + 1) * months);
+    const cycleDays = differenceInDays(periodEnd, periodStart);
+    if (!Number.isFinite(cycleDays) || cycleDays <= 0) return null;
+    const partialDays = daysLeft > 0 ? differenceInDays(periodEnd, trade) : 0;
+    const cycles = daysLeft > 0 ? wholeCycles + partialDays / cycleDays : 0;
+    return { amount, cycleDays, daysLeft, wholeCycles, partialDays, cycles, percentage: Math.min(100, cycles * 100), value: amount * cycles };
+  }
+
+  // 剩余不超过一个周期时显示百分比；超过一个周期时百分比会被封顶在 100%，改为显示剩余周期数。
+  function cycleShareText(result) {
+    return result.cycles > 1 ? `${result.cycles.toFixed(2)} 个周期` : `${result.percentage.toFixed(1)}%`;
+  }
+
+  function cycleShareLabel(result) {
+    return result.cycles > 1 ? `剩余 ${cycleShareText(result)}` : `周期占比 ${cycleShareText(result)}`;
+  }
+
+  // 计算式：不足一个周期时沿用「金额 × 剩余天数 ÷ 周期天数」，否则写成「金额 × (整周期 + 残缺天数/周期天数)」。
+  function cycleFormulaText(result, symbol, amountText) {
+    if (result.wholeCycles === 0) return `${symbol}${amountText} × ${result.daysLeft} 天 ÷ ${result.cycleDays} 天`;
+    const partial = result.partialDays ? ` + ${result.partialDays}/${result.cycleDays}` : '';
+    return `${symbol}${amountText} × (${result.wholeCycles}${partial}) 个周期`;
   }
 
   function trafficMeasurement(value) {
@@ -876,8 +902,8 @@
       values.renewalCycle,
     ].filter(Boolean).join(' / ');
     const detail = code === 'CNY'
-      ? `（剩余 ${result.daysLeft} 天，${result.percentage.toFixed(1)}%）`
-      : ` = ${symbol}${result.value.toFixed(2)} × ${rate.toFixed(4)}（剩余 ${result.daysLeft} 天，${result.percentage.toFixed(1)}%）`;
+      ? `（剩余 ${result.daysLeft} 天，${cycleShareText(result)}）`
+      : ` = ${symbol}${result.value.toFixed(2)} × ${rate.toFixed(4)}（剩余 ${result.daysLeft} 天，${cycleShareText(result)}）`;
     const lines = [
       renewal ? `- 续费金额 / 周期：${renewal}` : '',
       values.expiryDate ? `- 到期日期：${values.expiryDate}` : '',
@@ -907,7 +933,7 @@
     if (rateLine) rateLine.textContent = calcRateText(app, code, rate);
     if (amount) amount.textContent = Number.isFinite(remaining) ? remaining.toFixed(2) : '—';
     if (days) days.textContent = result ? `剩余 ${result.daysLeft} 天` : '剩余 ? 天';
-    if (percent) percent.textContent = result ? `周期占比 ${result.percentage.toFixed(1)}%` : '周期占比 ?';
+    if (percent) percent.textContent = result ? cycleShareLabel(result) : '周期占比 ?';
     if (progress) progress.style.width = result ? `${result.percentage}%` : '0%';
     if (progressTrack) progressTrack.hidden = !result;
     if (preview) renderPricePreview(preview, effectiveCalcAskingPrice(values, remaining), parsePrice(values.askingPremium), remaining, '预出价格可留空');
@@ -1047,7 +1073,7 @@
       return;
     }
     output.innerHTML = rate ? `<small>¥</small>${(result.value * rate.rate).toFixed(2)}` : '<small>¥</small>—';
-    days.textContent = `剩余 ${result.daysLeft} 天`; percent.textContent = `周期占比 ${result.percentage.toFixed(1)}%`; progress.style.width = `${result.percentage}%`;
+    days.textContent = `剩余 ${result.daysLeft} 天`; percent.textContent = cycleShareLabel(result); progress.style.width = `${result.percentage}%`;
     const wasHidden = progressTrack.hidden;
     progressTrack.hidden = false;
     if (wasHidden) { progressTrack.classList.remove('is-visible'); void progressTrack.offsetWidth; progressTrack.classList.add('is-visible'); }
@@ -1172,7 +1198,7 @@
         const renewal = `${currencySymbol(values.currency)}${formatAmount(values.renewalAmount)} / ${values.renewalCycle || '—'}`;
         const rateText = values.currency === 'CNY' ? '今日汇率 · 人民币' : `今日汇率 · ${rate.rate.toFixed(4)}`;
         const dateText = `${seasonName} · ${values.tradeDate || '—'}`;
-        const progressText = `${result.daysLeft} / ${result.cycleDays} 天 · ${result.percentage.toFixed(1)}%`;
+        const progressText = result.cycles > 1 ? `${result.daysLeft} 天 · ${cycleShareText(result)}` : `${result.daysLeft} / ${result.cycleDays} 天 · ${result.percentage.toFixed(1)}%`;
         const filledPixels = Math.max(0, Math.min(10, Math.round(result.percentage / 10)));
         context.drawImage(background, 0, 0, cardWidth, cardHeight + extra);
         context.beginPath(); context.roundRect(1.5, 1.5, 597, 272 + extra, 5); context.strokeStyle = '#714321'; context.lineWidth = 3; context.stroke();
@@ -1201,8 +1227,8 @@
         context.beginPath(); context.ellipse(65, 87, 7, 10, -0.28, 0, Math.PI * 2); context.fillStyle = '#8fca54'; context.fill(); context.strokeStyle = '#4b8a38'; context.lineWidth = 2; context.stroke();
         text(context, '剩余价值', 96, 94, `700 12px ${sans}`, '#876232');
         text(context, `¥${cny.toFixed(2)}`, 96, 126, `800 27px ${sans}`, '#9b5c19');
-        text(context, `${currencySymbol(values.currency)}${formatAmount(values.renewalAmount)} × ${result.daysLeft} 天`, 96, 146, `500 12px ${sans}`, '#80633e');
-        text(context, `÷ ${result.cycleDays} 天 = ${currencySymbol(values.currency)}${formatAmount(result.value)}`, 96, 163, `500 12px ${sans}`, '#80633e');
+        text(context, result.wholeCycles ? `${currencySymbol(values.currency)}${formatAmount(values.renewalAmount)} × ${result.cycles.toFixed(2)} 个周期` : `${currencySymbol(values.currency)}${formatAmount(values.renewalAmount)} × ${result.daysLeft} 天`, 96, 146, `500 12px ${sans}`, '#80633e');
+        text(context, result.wholeCycles ? `= ${currencySymbol(values.currency)}${formatAmount(result.value)}` : `÷ ${result.cycleDays} 天 = ${currencySymbol(values.currency)}${formatAmount(result.value)}`, 96, 163, `500 12px ${sans}`, '#80633e');
 
         roundedBox(context, 250, 68, 319, 64, 4, 'rgba(255,250,229,.80)', '#d6ac67');
         context.strokeStyle = '#e0c48e'; context.lineWidth = 1; context.beginPath(); context.moveTo(409.5, 69); context.lineTo(409.5, 131); context.stroke();
@@ -1330,7 +1356,7 @@
         });
         box(context, 24, 159, 264, 34, 12, 'rgba(255,255,255,.13)');
         box(context, 300, 159, 276, 34, 12, 'rgba(255,255,255,.13)');
-        text(context, '剩余百分比', 37, 181, `700 12px ${sans}`, '#fff', 'left', 'rgba(7,42,67,.58)'); text(context, `${result.percentage.toFixed(1)}%`, 275, 181, `700 15px ${sans}`, '#fff069', 'right', 'rgba(80,50,0,.6)');
+        text(context, result.cycles > 1 ? '剩余周期' : '剩余百分比', 37, 181, `700 12px ${sans}`, '#fff', 'left', 'rgba(7,42,67,.58)'); text(context, cycleShareText(result), 275, 181, `700 15px ${sans}`, '#fff069', 'right', 'rgba(80,50,0,.6)');
         text(context, '今日汇率', 313, 181, `700 12px ${sans}`, '#fff', 'left', 'rgba(7,42,67,.58)'); text(context, rateText, 563, 181, `700 15px ${sans}`, '#91ffb2', 'right', 'rgba(0,74,37,.7)');
         // 和上面「剩余百分比 / 今日汇率」同款半透明卡片：左图标 + 标签，值靠中，公式贴右。
         const customRow = (rowY, label, value, valueColor, detail, iconDraw) => {
@@ -1382,7 +1408,7 @@
           ['续费金额 / 周期', renewal, '#d7bb82'],
           ['到期日期', values.expiryDate || '—', '#d7bb82'],
           ['剩余天数', `${result.daysLeft} 天`, '#f4f0df'],
-          ['剩余百分比', `${result.percentage.toFixed(1)}%`, '#f4f0df'],
+          [result.cycles > 1 ? '剩余周期' : '剩余百分比', cycleShareText(result), '#f4f0df'],
           ['今日汇率', rateText, '#6ac66f'],
         ];
         let previewTop = '未填写预出价格';
@@ -1489,7 +1515,7 @@
     context.textAlign = 'right'; context.fillStyle = '#fff3d8'; context.font = `600 24px ${sans}`;
     context.fillText(`剩余 ${result.daysLeft} 天`, 1158, 55);
     context.fillStyle = '#bdc9da'; context.font = `400 20px ${sans}`;
-    context.fillText(`周期占比 ${result.percentage.toFixed(1)}%`, 1158, 87); context.textAlign = 'left';
+    context.fillText(cycleShareLabel(result), 1158, 87); context.textAlign = 'left';
 
     const info = [
       ['续费金额 / 周期', `${currencySymbol(values.currency)}${formatAmount(values.renewalAmount)} / ${values.renewalCycle || '—'}`],
@@ -1512,7 +1538,7 @@
     context.fillStyle = '#d9961c'; context.font = `750 76px ${sans}`;
     context.fillText(`¥${cny.toFixed(2)}`, 60, 391);
     context.fillStyle = '#718096'; context.font = `500 18px ${sans}`;
-    context.fillText(`${currencySymbol(values.currency)}${formatAmount(values.renewalAmount)} × ${result.daysLeft} 天 ÷ ${result.cycleDays} 天 = ${currencySymbol(values.currency)}${result.value.toFixed(2)}`, 60, 438);
+    context.fillText(`${cycleFormulaText(result, currencySymbol(values.currency), formatAmount(values.renewalAmount))} = ${currencySymbol(values.currency)}${result.value.toFixed(2)}`, 60, 438);
     context.fillStyle = '#95a3b8'; context.font = `400 18px ${sans}`;
     context.fillText(`汇率：1 ${currencyCode(values.currency) || values.currency || '—'} = ${rate.rate.toFixed(4)} CNY`, 60, 476);
 
@@ -1551,6 +1577,12 @@
       });
     }
     return new Promise((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('卡片生成失败')), 'image/png'));
+  }
+
+  function nodeImageErrorDetail(response) {
+    const body = response?.response;
+    const detail = body && typeof body === 'object' ? (body.error || body.message) : '';
+    return detail ? `：${detail}` : '';
   }
 
   function nodeImageRequest(options) {
@@ -1989,11 +2021,11 @@
       const originalValue = `${currencySymbol(values.currency)}${result.value.toFixed(2)}`;
       const calculation = `¥${cnyValue.toFixed(2)}`;
       const detail = currencyCode(values.currency) === 'CNY'
-        ? `（剩余 ${result.daysLeft} 天，${result.percentage.toFixed(1)}%）`
-        : ` = ${originalValue} × ${rate.rate.toFixed(4)}（剩余 ${result.daysLeft} 天，${result.percentage.toFixed(1)}%）`;
+        ? `（剩余 ${result.daysLeft} 天，${cycleShareText(result)}）`
+        : ` = ${originalValue} × ${rate.rate.toFixed(4)}（剩余 ${result.daysLeft} 天，${cycleShareText(result)}）`;
       renewal.push(`- 剩余价值：${calculation}${detail}`);
     } else if (renewalFields.includes('remainingValue') && result) {
-      renewal.push(`- 剩余价值：${currencySymbol(values.currency)}${result.value.toFixed(2)}（剩余 ${result.daysLeft} 天，${result.percentage.toFixed(1)}%）`);
+      renewal.push(`- 剩余价值：${currencySymbol(values.currency)}${result.value.toFixed(2)}（剩余 ${result.daysLeft} 天，${cycleShareText(result)}）`);
     }
     const askingPrice = effectiveAskingPrice(values, rate);
     if (Number.isFinite(askingPrice)) renewal.push(`- 预出价格：¥${askingPrice.toFixed(2)}（人民币）`);

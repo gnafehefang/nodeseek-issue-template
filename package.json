@@ -5,5 +5,9 @@
   },
   "devDependencies": {
     "terser": "5.49.0"
+  },
+  "scripts": {
+    "build": "node tools/build.js build",
+    "test": "node --test test/calculation.test.js"
   }
 }

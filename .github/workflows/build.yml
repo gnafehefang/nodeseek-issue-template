@@ -23,6 +23,8 @@ jobs:
           cache: npm
       - name: Install build dependencies
         run: npm ci
+      - name: Run unit tests
+        run: npm test
       - name: Build userscript
         run: node tools/build.js build
       - name: Verify generated script
