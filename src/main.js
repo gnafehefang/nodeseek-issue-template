@@ -645,3 +645,4 @@
 
   // 功能开关挂在油猴菜单里：编辑页、帖子页、列表页都能打开同一个设置框
   if (typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand('功能开关', () => openFeatureFlagDialog(featureFlagHost()));
+  if (typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand('设置 NodeImage API Key', setNodeImageApiKeyFromMenu);

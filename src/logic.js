@@ -1585,35 +1585,65 @@
     return detail ? `：${detail}` : '';
   }
 
-  function nodeImageRequest(options) {
+  function nodeImageRequest(options, label = '上传失败') {
     if (typeof GM_xmlhttpRequest !== 'function') throw new Error('请在 Tampermonkey 中运行脚本以上传图片');
     return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({ ...options, withCredentials: true, responseType: 'json', onload: (response) => response.status === 200 ? resolve(response.response) : reject(Object.assign(new Error(`上传失败（HTTP ${response.status}）`), { status: response.status })), onerror: () => reject(new Error('图片上传网络错误')) });
+      GM_xmlhttpRequest({
+        ...options, withCredentials: true, responseType: 'json',
+        onload: (response) => response.status === 200
+          ? resolve(response.response)
+          : reject(Object.assign(new Error(`${label}（HTTP ${response.status}）${nodeImageErrorDetail(response)}`), { status: response.status })),
+        onerror: () => reject(new Error(`${label}：网络错误，请确认能访问 api.nodeimage.com`)),
+      });
     });
   }
 
+  const NODEIMAGE_KEY_HELP = '请在本浏览器重新登录 nodeimage.com，或在 Tampermonkey 菜单「设置 NodeImage API Key」中手动填写';
+
+  // 返回 { key, fresh }：fresh 表示这把 Key 是刚从 NodeImage 登录态换来的。
   async function getNodeImageApiKey(force = false) {
     const cached = !force && typeof GM_getValue === 'function' ? GM_getValue(NODEIMAGE_KEY, '') : '';
-    if (cached) return cached;
-    const response = await nodeImageRequest({ method: 'GET', url: 'https://api.nodeimage.com/api/user/api-key', headers: { Accept: 'application/json' } });
-    if (!response?.api_key) throw new Error('请先登录 NodeImage 后重试');
+    if (cached) return { key: cached, fresh: false };
+    let response;
+    try {
+      response = await nodeImageRequest({ method: 'GET', url: 'https://api.nodeimage.com/api/user/api-key', headers: { Accept: 'application/json' } }, '获取 NodeImage API Key 失败');
+    } catch (error) {
+      throw Object.assign(new Error(`${error.message}；${NODEIMAGE_KEY_HELP}`), { keyFetchFailed: true });
+    }
+    if (!response?.api_key) throw Object.assign(new Error(`未获取到 NodeImage API Key；${NODEIMAGE_KEY_HELP}`), { keyFetchFailed: true });
     GM_setValue(NODEIMAGE_KEY, response.api_key);
-    return response.api_key;
+    return { key: response.api_key, fresh: true };
+  }
+
+  function setNodeImageApiKeyFromMenu() {
+    if (typeof GM_setValue !== 'function') return;
+    const current = typeof GM_getValue === 'function' ? GM_getValue(NODEIMAGE_KEY, '') : '';
+    const input = window.prompt(`填写 NodeImage API Key（nodeimage.com 登录后在「API 密钥」处复制）。\n留空并确定 = 清除已保存的 Key，改为按登录状态自动获取。\n当前：${current ? `已设置（${current.length} 位）` : '未设置'}`, '');
+    if (input === null) return;
+    const key = input.trim();
+    GM_setValue(NODEIMAGE_KEY, key);
+    window.alert(key ? 'NodeImage API Key 已保存。' : '已清除 NodeImage API Key。');
   }
 
   async function uploadValueCard(values, app, rate, payback = null) {
     const blob = await createValueCard(values, app, rate, payback);
+    let usedFreshKey = false;
     const upload = async (forceKey = false) => {
       const data = new FormData();
       data.append('image', new File([blob], 'nodeseek-value-card.png', { type: 'image/png' }));
-      const apiKey = await getNodeImageApiKey(forceKey);
-      return nodeImageRequest({ method: 'POST', url: 'https://api.nodeimage.com/api/upload', headers: { Accept: 'application/json', 'X-API-Key': apiKey }, data });
+      const { key, fresh } = await getNodeImageApiKey(forceKey);
+      usedFreshKey = fresh;
+      return nodeImageRequest({ method: 'POST', url: 'https://api.nodeimage.com/api/upload', headers: { Accept: 'application/json', 'X-API-Key': key }, data }, '图片上传失败');
     };
     let response;
     try {
       response = await upload();
     } catch (error) {
-      if (error.status !== 401) throw error;
+      // 只有「缓存的旧 Key 被拒」才值得清掉重取一次；Key 本身获取失败或刚换来的 Key 也被拒，就直接报错。
+      if (error.keyFetchFailed || usedFreshKey || error.status !== 401) {
+        if (error.status === 401 && !error.keyFetchFailed) typeof GM_setValue === 'function' && GM_setValue(NODEIMAGE_KEY, '');
+        throw error.status === 401 && !error.keyFetchFailed ? new Error(`${error.message}；API Key 无效，${NODEIMAGE_KEY_HELP}`) : error;
+      }
       typeof GM_setValue === 'function' && GM_setValue(NODEIMAGE_KEY, '');
       response = await upload(true);
     }
